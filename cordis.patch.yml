@@ -1,0 +1,13 @@
+# dsh-echarts: render strict JSON ```echarts fences in DSH Web messages.
+- insert:
+    - id: echarts
+      name: '@dsh-external/dsh-echarts'
+      config:
+        # 'auto' follows body[data-ds-dark-theme].
+        theme: auto
+        # Fixed chart height in CSS pixels.
+        height: 400
+        # UTF-8 byte limit for one fence.
+        maxTextSize: 200000
+        # Total recursively visited JSON values allowed in one option.
+        maxOptionNodes: 100000

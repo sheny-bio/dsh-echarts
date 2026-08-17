@@ -1,0 +1,67 @@
+{
+  "name": "@dsh-external/dsh-echarts",
+  "version": "0.1.0",
+  "description": "Render strict JSON ```echarts fences as interactive Apache ECharts charts in DSH Web.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "dsh-plugin",
+    "web-ui",
+    "echarts",
+    "data-visualization",
+    "canvas"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown -c tsdown.config.mjs",
+    "check": "tsc -p tsconfig.json --noEmit --pretty false",
+    "prepare": "npm run build",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "test:e2e": "DSH_ECHARTS_E2E=1 vitest run tests/live-server-e2e.spec.ts"
+  },
+  "dependencies": {
+    "echarts": "^6.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "jsdom": "^26.0.0",
+    "playwright": "^1.62.1",
+    "tsdown": "^0.22.14",
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "license": "MIT"
+}
