@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { registerRoutes, serveDistFile, type EChartsHostContext } from '../src/index.ts'
-import { CONFIG_ROUTE, DEFAULT_CONFIG, DIST_PREFIX } from '../src/protocol.ts'
+import { CONFIG_ROUTE, DEFAULT_CONFIG, DIST_PREFIX, ECHARTS_BUNDLE } from '../src/protocol.ts'
 
 class CapturedResponse {
   status = 0
@@ -28,14 +28,26 @@ const tempRoots: string[] = []
 async function fixtureRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-echarts-host-'))
   tempRoots.push(root)
-  await writeFile(join(root, 'echarts.min.js'), 'window.echarts = {}')
-  await writeFile(join(root, 'echarts.min.js.map'), '{}')
+  await writeFile(join(root, ECHARTS_BUNDLE), 'window.echarts = {}')
+  await writeFile(join(root, `${ECHARTS_BUNDLE}.map`), '{}')
   return root
 }
 
 function response(): [CapturedResponse, ServerResponse] {
   const capture = new CapturedResponse()
   return [capture, capture as unknown as ServerResponse]
+}
+
+/** Register against a throwaway root and hand back just the dist (prefix) route. */
+async function prefixRoute(): Promise<Parameters<EChartsHostContext['webServer']['register']>[0]> {
+  const root = await fixtureRoot()
+  let route: Parameters<EChartsHostContext['webServer']['register']>[0] | undefined
+  const ctx: EChartsHostContext = {
+    webServer: { register(candidate) { if (candidate.kind === 'prefix') route = candidate; return () => {} } },
+    effect(callback) { callback() },
+  }
+  registerRoutes(ctx, DEFAULT_CONFIG, root)
+  return route!
 }
 
 afterEach(async () => {
@@ -46,15 +58,46 @@ describe('serveDistFile', () => {
   it('serves only the bundle and source map with explicit MIME types', async () => {
     const root = await fixtureRoot()
     const [js, jsResponse] = response()
-    await serveDistFile(root, '/echarts.min.js', jsResponse)
+    await serveDistFile(root, `/${ECHARTS_BUNDLE}`, jsResponse)
     expect(js.status).toBe(200)
     expect(js.headers['content-type']).toContain('text/javascript')
     expect(js.body.toString()).toContain('window.echarts')
 
     const [map, mapResponse] = response()
-    await serveDistFile(root, '/echarts.min.js.map', mapResponse)
+    await serveDistFile(root, `/${ECHARTS_BUNDLE}.map`, mapResponse)
     expect(map.status).toBe(200)
     expect(map.headers['content-type']).toContain('application/json')
+  })
+
+  it('answers a matching If-None-Match with an empty 304', async () => {
+    const root = await fixtureRoot()
+    const [first, firstResponse] = response()
+    await serveDistFile(root, `/${ECHARTS_BUNDLE}`, firstResponse)
+    const etag = first.headers['etag']
+    expect(etag).toMatch(/^"[0-9a-f]+-[0-9a-f]+"$/)
+
+    const [revalidated, revalidatedResponse] = response()
+    await serveDistFile(root, `/${ECHARTS_BUNDLE}`, revalidatedResponse, etag)
+    expect(revalidated.status).toBe(304)
+    expect(revalidated.body).toHaveLength(0)
+
+    const [stale, staleResponse] = response()
+    await serveDistFile(root, `/${ECHARTS_BUNDLE}`, staleResponse, '"outdated"')
+    expect(stale.status).toBe(200)
+    expect(stale.body.toString()).toContain('window.echarts')
+  })
+
+  it('re-reads the bundle after it changes on disk', async () => {
+    const root = await fixtureRoot()
+    const [first, firstResponse] = response()
+    await serveDistFile(root, `/${ECHARTS_BUNDLE}`, firstResponse)
+
+    await writeFile(join(root, ECHARTS_BUNDLE), 'window.echarts = { version: "next" }')
+    const [second, secondResponse] = response()
+    await serveDistFile(root, `/${ECHARTS_BUNDLE}`, secondResponse, first.headers['etag'])
+    expect(second.status).toBe(200)
+    expect(second.body.toString()).toContain('next')
+    expect(second.headers['etag']).not.toBe(first.headers['etag'])
   })
 
   it('rejects traversal and unknown files', async () => {
@@ -100,16 +143,26 @@ describe('registerRoutes', () => {
     expect(unregister[1]).toHaveBeenCalledOnce()
   })
 
+  it('forwards If-None-Match from the request to the asset handler', async () => {
+    const route = await prefixRoute()
+    const url = `${DIST_PREFIX}/${ECHARTS_BUNDLE}`
+
+    const [first, firstResponse] = response()
+    await route.handler({ url, headers: {} } as IncomingMessage, firstResponse)
+    expect(first.status).toBe(200)
+
+    const [cached, cachedResponse] = response()
+    await route.handler(
+      { url, headers: { 'if-none-match': first.headers['etag'] } } as unknown as IncomingMessage,
+      cachedResponse,
+    )
+    expect(cached.status).toBe(304)
+  })
+
   it('returns 400 for malformed percent encoding', async () => {
-    const root = await fixtureRoot()
-    let prefixRoute: Parameters<EChartsHostContext['webServer']['register']>[0] | undefined
-    const ctx: EChartsHostContext = {
-      webServer: { register(route) { if (route.kind === 'prefix') prefixRoute = route; return () => {} } },
-      effect(callback) { callback() },
-    }
-    registerRoutes(ctx, DEFAULT_CONFIG, root)
+    const route = await prefixRoute()
     const [capture, malformedResponse] = response()
-    await prefixRoute!.handler({ url: `${DIST_PREFIX}/%E0%A4%A` } as IncomingMessage, malformedResponse)
+    await route.handler({ url: `${DIST_PREFIX}/%E0%A4%A` } as IncomingMessage, malformedResponse)
     expect(capture.status).toBe(400)
   })
 })

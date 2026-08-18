@@ -5,6 +5,7 @@ export type EChartsOption = Record<string, unknown>
 const MAX_DEPTH = 64
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 const EXTERNAL_IMAGE = /^(?:image:\/\/|https?:\/\/|\/\/|data:|blob:|javascript:)/i
+const EXTERNAL_IMAGE_SYMBOL = /^image:\/\//i
 const TITLE_LINK_KEYS = new Set(['link', 'target', 'sublink', 'subtarget'])
 
 export class EChartsOptionError extends Error {
@@ -19,11 +20,30 @@ function pathLabel(path: ReadonlyArray<string | number>): string {
   return path.map((part, index) => typeof part === 'number' ? `[${part}]` : `${index === 0 ? '' : '.'}${part}`).join('')
 }
 
-function validateTree(value: unknown, config: EChartsPluginConfig): void {
+/**
+ * Validate and sanitize in one pass.
+ *
+ * The path is a mutable stack rather than a fresh array per node, and ancestor lookups
+ * (`title`, `toolbox`/`feature`) are depth counters rather than repeated `includes` scans —
+ * both matter because this runs on the browser's main thread for every fence.
+ */
+function sanitizeTree(root: unknown, config: EChartsPluginConfig): void {
+  const path: Array<string | number> = []
   let nodes = 0
+  let titleDepth = 0
+  let toolboxDepth = 0
+  let featureDepth = 0
 
-  const visit = (current: unknown, path: Array<string | number>, depth: number): void => {
-    if (depth > MAX_DEPTH) throw new EChartsOptionError(`option exceeds maximum depth ${MAX_DEPTH} at ${pathLabel(path)}`)
+  /** Label the offending key; the stack is never unwound because this always throws. */
+  const failAt = (key: string, message: string): never => {
+    path.push(key)
+    throw new EChartsOptionError(`${message} at ${pathLabel(path)}`)
+  }
+
+  const visit = (current: unknown, depth: number): void => {
+    if (depth > MAX_DEPTH) {
+      throw new EChartsOptionError(`option exceeds maximum depth ${MAX_DEPTH} at ${pathLabel(path)}`)
+    }
     nodes += 1
     if (nodes > config.maxOptionNodes) {
       throw new EChartsOptionError(`option exceeds maxOptionNodes (${config.maxOptionNodes})`)
@@ -32,58 +52,71 @@ function validateTree(value: unknown, config: EChartsPluginConfig): void {
       throw new EChartsOptionError(`non-finite number is not allowed at ${pathLabel(path)}`)
     }
     if (current === null || typeof current !== 'object') return
+
     if (Array.isArray(current)) {
-      current.forEach((item, index) => visit(item, [...path, index], depth + 1))
+      for (let index = 0; index < current.length; index += 1) {
+        path.push(index)
+        visit(current[index], depth + 1)
+        path.pop()
+      }
       return
     }
 
-    for (const [key, child] of Object.entries(current as Record<string, unknown>)) {
-      if (DANGEROUS_KEYS.has(key)) {
-        throw new EChartsOptionError(`unsafe key "${key}" at ${pathLabel([...path, key])}`)
-      }
-      if (key === 'symbol' && typeof child === 'string' && /^image:\/\//i.test(child)) {
-        throw new EChartsOptionError(`external image symbol is not allowed at ${pathLabel([...path, key])}`)
-      }
-      if (key === 'image' && typeof child === 'string' && EXTERNAL_IMAGE.test(child.trim())) {
-        throw new EChartsOptionError(`external image is not allowed at ${pathLabel([...path, key])}`)
-      }
-      if (path.includes('title') && TITLE_LINK_KEYS.has(key) && typeof child === 'string' && child.trim() !== '') {
-        throw new EChartsOptionError(`title navigation is not allowed at ${pathLabel([...path, key])}`)
-      }
-      if (key === 'dataView' && path.includes('toolbox') && path.includes('feature')
-        && child !== null && typeof child === 'object' && !Array.isArray(child)
-        && (child as Record<string, unknown>)['show'] !== false) {
-        throw new EChartsOptionError(`toolbox dataView is not allowed at ${pathLabel([...path, key])}`)
-      }
-      visit(child, [...path, key], depth + 1)
-    }
-  }
-
-  visit(value, [], 0)
-}
-
-function forceRichTextTooltips(value: unknown): void {
-  if (value === null || typeof value !== 'object') return
-  if (Array.isArray(value)) {
-    for (const item of value) forceRichTextTooltips(item)
-    return
-  }
-  const object = value as Record<string, unknown>
-  for (const [key, child] of Object.entries(object)) {
-    if (key === 'tooltip') {
-      const tooltips = Array.isArray(child) ? child : [child]
-      for (const tooltip of tooltips) {
-        if (tooltip !== null && typeof tooltip === 'object' && !Array.isArray(tooltip)) {
-          ;(tooltip as Record<string, unknown>)['renderMode'] = 'richText'
+    const object = current as Record<string, unknown>
+    for (const key of Object.keys(object)) {
+      const child = object[key]
+      if (DANGEROUS_KEYS.has(key)) failAt(key, `unsafe key "${key}"`)
+      if (typeof child === 'string') {
+        if (key === 'symbol' && EXTERNAL_IMAGE_SYMBOL.test(child)) {
+          failAt(key, 'external image symbol is not allowed')
+        }
+        if (key === 'image' && EXTERNAL_IMAGE.test(child.trim())) {
+          failAt(key, 'external image is not allowed')
+        }
+        if (titleDepth > 0 && TITLE_LINK_KEYS.has(key) && child.trim() !== '') {
+          failAt(key, 'title navigation is not allowed')
         }
       }
+      if (key === 'dataView' && toolboxDepth > 0 && featureDepth > 0
+        && child !== null && typeof child === 'object' && !Array.isArray(child)
+        && (child as Record<string, unknown>)['show'] !== false) {
+        failAt(key, 'toolbox dataView is not allowed')
+      }
+
+      if (key === 'title') titleDepth += 1
+      else if (key === 'toolbox') toolboxDepth += 1
+      else if (key === 'feature') featureDepth += 1
+      path.push(key)
+      visit(child, depth + 1)
+      path.pop()
+      if (key === 'title') titleDepth -= 1
+      else if (key === 'toolbox') toolboxDepth -= 1
+      else if (key === 'feature') featureDepth -= 1
+
+      // Applied after the subtree is validated so the injected key is not counted or re-scanned.
+      if (key === 'tooltip') forceRichText(child)
     }
-    forceRichTextTooltips(child)
+  }
+
+  visit(root, 0)
+}
+
+/** ECharts HTML tooltips would inject assistant-authored markup; richText cannot. */
+function forceRichText(value: unknown): void {
+  for (const tooltip of Array.isArray(value) ? value : [value]) {
+    if (tooltip !== null && typeof tooltip === 'object' && !Array.isArray(tooltip)) {
+      ;(tooltip as Record<string, unknown>)['renderMode'] = 'richText'
+    }
   }
 }
 
 /** Parse, resource-bound, and sanitize an untrusted assistant-produced option. */
 export function parseEChartsOption(source: string, config: EChartsPluginConfig): EChartsOption {
+  // UTF-8 length is never below the UTF-16 code unit count, so oversized input is rejected
+  // before TextEncoder allocates a copy of it — which also bounds that copy to maxTextSize.
+  if (source.length > config.maxTextSize) {
+    throw new EChartsOptionError(`fence exceeds maxTextSize (${config.maxTextSize} bytes)`)
+  }
   const bytes = new TextEncoder().encode(source).byteLength
   if (bytes > config.maxTextSize) {
     throw new EChartsOptionError(`fence is ${bytes} bytes; maxTextSize is ${config.maxTextSize}`)
@@ -100,7 +133,6 @@ export function parseEChartsOption(source: string, config: EChartsPluginConfig):
     throw new EChartsOptionError('the fence root must be a JSON object')
   }
 
-  validateTree(parsed, config)
-  forceRichTextTooltips(parsed)
+  sanitizeTree(parsed, config)
   return parsed as EChartsOption
 }

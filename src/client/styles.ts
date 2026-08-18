@@ -1,3 +1,5 @@
+import { DARK_THEME_ATTR } from './dom.ts'
+
 export const STYLE_ID = 'dsh-echarts-styles'
 
 let mounts = 0
@@ -39,7 +41,7 @@ const CSS = `
   color: #c62a31;
   font-size: 12px;
 }
-body[data-ds-dark-theme] .dsh-echarts-error {
+body[${DARK_THEME_ATTR}] .dsh-echarts-error {
   color: #ff8b8f;
 }
 .dsh-echarts-error-message {
