@@ -1,5 +1,7 @@
 import { chromium } from 'playwright'
 import { describe, expect, it } from 'vitest'
+import { ERROR_BAR_CLASS, HOST_CLASS, RENDERED_ATTR } from '../src/client/dom.ts'
+import { CONFIG_ROUTE, DIST_PREFIX, ECHARTS_BUNDLE } from '../src/protocol.ts'
 
 const BASE = process.env.DSH_WEB_BASE ?? 'http://127.0.0.1:3080'
 const enabled = process.env.DSH_ECHARTS_E2E === '1'
@@ -7,9 +9,9 @@ const enabled = process.env.DSH_ECHARTS_E2E === '1'
 describe.skipIf(!enabled)('live DSH Web with Playwright', () => {
   it('serves assets and turns settled fences into interactive canvases', async () => {
     const [config, bundle, umd] = await Promise.all([
-      fetch(`${BASE}/echarts-dist/config.json`),
+      fetch(`${BASE}${CONFIG_ROUTE}`),
       fetch(`${BASE}/plugins/@dsh-external/dsh-echarts/client.js`),
-      fetch(`${BASE}/echarts-dist/echarts.min.js`),
+      fetch(`${BASE}${DIST_PREFIX}/${ECHARTS_BUNDLE}`),
     ])
     expect(config.status).toBe(200)
     expect(bundle.status).toBe(200)
@@ -57,19 +59,19 @@ describe.skipIf(!enabled)('live DSH Web with Playwright', () => {
         window.setTimeout(() => { info.textContent = 'echarts' }, 100)
       })
       const fixture = page.locator('.md-code-block._block_e2e')
-      await fixture.locator('.dsh-echarts canvas').waitFor({ timeout: 10_000 })
-      await page.locator('.md-code-block._block_e2e_second .dsh-echarts canvas').waitFor({ timeout: 10_000 })
+      await fixture.locator(`.${HOST_CLASS} canvas`).waitFor({ timeout: 10_000 })
+      await page.locator(`.md-code-block._block_e2e_second .${HOST_CLASS} canvas`).waitFor({ timeout: 10_000 })
       expect(await fixture.locator('[class*="infostring"]').textContent()).toBe('echarts')
       expect(await fixture.locator('button').textContent()).toBe('复制')
-      expect(await fixture.getAttribute('data-dsh-echarts')).toBe('1')
+      expect(await fixture.getAttribute(RENDERED_ATTR)).toBe('1')
       const unsafe = page.locator('.md-code-block._block_e2e_unsafe')
-      await unsafe.locator('.dsh-echarts-error').waitFor({ timeout: 10_000 })
+      await unsafe.locator(`.${ERROR_BAR_CLASS}`).waitFor({ timeout: 10_000 })
       expect(await unsafe.locator('pre').count()).toBe(1)
 
       await page.evaluate(() => document.body.toggleAttribute('data-ds-dark-theme'))
       await page.waitForTimeout(200)
-      expect(await fixture.locator('.dsh-echarts canvas').count()).toBe(1)
-      expect(await page.locator('.md-code-block._block_e2e_second .dsh-echarts canvas').count()).toBe(1)
+      expect(await fixture.locator(`.${HOST_CLASS} canvas`).count()).toBe(1)
+      expect(await page.locator(`.md-code-block._block_e2e_second .${HOST_CLASS} canvas`).count()).toBe(1)
     } finally {
       await browser.close()
     }

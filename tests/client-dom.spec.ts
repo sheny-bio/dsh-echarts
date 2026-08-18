@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  __resetForTests,
   cleanupDetached,
+  DARK_THEME_ATTR,
   dispose,
   ERROR_BAR_CLASS,
   fenceSource,
   HOST_CLASS,
   isEChartsBlock,
   refreshThemes,
+  RENDERED_ATTR,
   resolveTheme,
   scan,
   type EChartsApi,
@@ -17,26 +18,10 @@ import {
 } from '../src/client/dom.ts'
 import { mountStyles, STYLE_ID } from '../src/client/styles.ts'
 import { DEFAULT_CONFIG } from '../src/protocol.ts'
+import { codeBlock as buildCodeBlock } from './fixtures.ts'
 
 function codeBlock(language: string, source: string): HTMLElement {
-  const block = document.createElement('div')
-  block.className = '_block_hash md-code-block'
-  const banner = document.createElement('div')
-  const info = document.createElement('div')
-  info.className = '_infostring_hash'
-  info.textContent = language
-  const actions = document.createElement('div')
-  actions.className = '_action_hash'
-  const copy = document.createElement('button')
-  copy.textContent = '复制'
-  actions.append(copy)
-  banner.append(info, actions)
-  const pre = document.createElement('pre')
-  const code = document.createElement('code')
-  code.textContent = `${source}\n`
-  pre.append(code)
-  block.append(banner, pre)
-  return block
+  return buildCodeBlock(document, language, source)
 }
 
 interface MockHarness {
@@ -71,10 +56,10 @@ async function settle(): Promise<void> {
 }
 
 beforeEach(() => {
-  __resetForTests()
+  dispose()
   document.head.innerHTML = ''
   document.body.innerHTML = ''
-  document.body.removeAttribute('data-ds-dark-theme')
+  document.body.removeAttribute(DARK_THEME_ATTR)
   Object.defineProperty(globalThis, 'IntersectionObserver', { value: undefined, configurable: true, writable: true })
   Object.defineProperty(globalThis, 'ResizeObserver', { value: undefined, configurable: true, writable: true })
   vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -118,7 +103,7 @@ describe('render lifecycle', () => {
     expect(mock.charts[0]!.setOption).toHaveBeenCalledWith(expect.objectContaining({
       tooltip: { renderMode: 'richText' },
     }), { notMerge: true, lazyUpdate: false })
-    expect(block.getAttribute('data-dsh-echarts')).toBe('1')
+    expect(block.getAttribute(RENDERED_ATTR)).toBe('1')
   })
 
   it('is idempotent across repeated scans', async () => {
@@ -169,7 +154,7 @@ describe('render lifecycle', () => {
     const mock = harness()
     scan(mock.env)
     await settle()
-    document.body.setAttribute('data-ds-dark-theme', '')
+    document.body.setAttribute(DARK_THEME_ATTR, '')
     refreshThemes(mock.env)
     await settle()
 

@@ -5,10 +5,11 @@ import {
   DEFAULT_CONFIG,
   DIST_PREFIX,
   ECHARTS_BUNDLE,
+  LOAD_TIMEOUT_MS,
   validateConfig,
   type EChartsPluginConfig,
 } from '../protocol.ts'
-import { dispose, refreshThemes, scan, type EChartsApi, type EChartsRenderEnv } from './dom.ts'
+import { DARK_THEME_ATTR, dispose, refreshThemes, scan, type EChartsApi, type EChartsRenderEnv } from './dom.ts'
 import { mountStyles } from './styles.ts'
 
 declare global {
@@ -26,7 +27,7 @@ let configPromise: Promise<EChartsPluginConfig> | undefined
 
 function loadECharts(): Promise<EChartsApi> {
   if (echartsPromise !== undefined) return echartsPromise
-  const pending = new Promise<EChartsApi>((resolve, reject) => {
+  echartsPromise = new Promise<EChartsApi>((resolve, reject) => {
     if (window.echarts !== undefined) {
       resolve(window.echarts)
       return
@@ -38,7 +39,7 @@ function loadECharts(): Promise<EChartsApi> {
     const timeout = window.setTimeout(() => {
       script.remove()
       reject(new Error('dsh-echarts: timed out loading ECharts bundle'))
-    }, 15_000)
+    }, LOAD_TIMEOUT_MS)
     script.onload = () => {
       window.clearTimeout(timeout)
       if (window.echarts === undefined) reject(new Error('dsh-echarts: bundle loaded but window.echarts is missing'))
@@ -50,13 +51,11 @@ function loadECharts(): Promise<EChartsApi> {
       reject(new Error('dsh-echarts: failed to load ECharts bundle'))
     }
     document.head.append(script)
-  })
-  const cached = pending.catch((error) => {
-    echartsPromise = undefined
+  }).catch((error) => {
+    echartsPromise = undefined // Let a later fence retry after a transient network failure.
     throw error
   })
-  echartsPromise = cached
-  return cached
+  return echartsPromise
 }
 
 function loadConfig(): Promise<EChartsPluginConfig> {
@@ -74,6 +73,39 @@ function loadConfig(): Promise<EChartsPluginConfig> {
   return configPromise
 }
 
+/**
+ * Coalesce bursts of DOM mutations into one scan per frame.
+ *
+ * Streaming a reply mutates the conversation subtree dozens of times per second, and each
+ * scan is a full-document query — running one per mutation record burns the main thread on
+ * repeated work that only the last pass can act on.
+ */
+interface FrameScheduler {
+  schedule(): void
+  cancel(): void
+}
+
+function frameScheduler(run: () => void): FrameScheduler {
+  const canAnimate = typeof requestAnimationFrame === 'function'
+  let handle: number | undefined
+  const fire = (): void => {
+    handle = undefined
+    run()
+  }
+  return {
+    schedule(): void {
+      if (handle !== undefined) return
+      handle = canAnimate ? requestAnimationFrame(fire) : window.setTimeout(fire, 16)
+    },
+    cancel(): void {
+      if (handle === undefined) return
+      if (canAnimate) cancelAnimationFrame(handle)
+      else window.clearTimeout(handle)
+      handle = undefined
+    },
+  }
+}
+
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => mountStyles(), 'dsh-echarts: styles')
 
@@ -81,19 +113,22 @@ export function apply(ctx: ClientContext): void {
     let active = true
     let fenceObserver: MutationObserver | undefined
     let themeObserver: MutationObserver | undefined
+    let scheduler: FrameScheduler | undefined
 
     void loadConfig().then((config) => {
       if (!active) return
       const env: EChartsRenderEnv = { loadECharts, config }
       scan(env)
 
-      fenceObserver = new MutationObserver(() => scan(env))
+      scheduler = frameScheduler(() => { if (active) scan(env) })
+      fenceObserver = new MutationObserver(() => scheduler?.schedule())
       fenceObserver.observe(document.body, { childList: true, subtree: true })
 
+      // Theme changes are user-driven and rare, so they stay synchronous.
       themeObserver = new MutationObserver(() => refreshThemes(env))
       themeObserver.observe(document.body, {
         attributes: true,
-        attributeFilter: ['data-ds-dark-theme'],
+        attributeFilter: [DARK_THEME_ATTR],
       })
     })
 
@@ -101,6 +136,7 @@ export function apply(ctx: ClientContext): void {
       active = false
       fenceObserver?.disconnect()
       themeObserver?.disconnect()
+      scheduler?.cancel()
       dispose()
     }
   }, 'dsh-echarts: fence and theme observers')
